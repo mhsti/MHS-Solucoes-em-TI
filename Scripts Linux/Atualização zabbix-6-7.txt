@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Ajustes as Variáveis de configuração e também a versão do PHP para que o script funcione.
+# Lembre-se Faça um backup da VM (Se for virtual), e teste o script em homologação antes de atualizar em Produção. Nenhum ambiente é igual, cada um tem as suas particularidades. 
+# Para apoio ou ajuda entre em contato e-mail: marcos.hslima@outlook.com, Whats: +5541996512131
+
+# Configurações
+DB_NAME="zabbix"
+DB_USER="zabbix"
+DB_HOST="localhost"
+BACKUP_DIR="/var/backups/zabbix"
+ZABBIX_CONF="/etc/zabbix/zabbix_server.conf"
+FRONTEND_DIR="/usr/share/zabbix"
+NGINX_CONF="/etc/nginx/sites-available/zabbix"
+
+# Função para exibir mensagens
+log() {
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] $1"
+}
+
+# Verificação de permissões
+if [[ $EUID -ne 0 ]]; then
+   log "Este script deve ser executado como root."
+   exit 1
+fi
+
+# Etapa 1: Criar backups
+log "Iniciando backups..."
+mkdir -p "$BACKUP_DIR"
+pg_dump -U "$DB_USER" -h "$DB_HOST" "$DB_NAME" > "$BACKUP_DIR/zabbix_backup.sql" || { log "Erro ao fazer backup do banco de dados"; exit 1; }
+cp "$ZABBIX_CONF" "$BACKUP_DIR/zabbix_server.conf.bak"
+cp -r "$FRONTEND_DIR" "$BACKUP_DIR/zabbix_frontend.bak"
+cp "$NGINX_CONF" "$BACKUP_DIR/nginx_zabbix.conf.bak"
+log "Backups concluídos com sucesso."
+
+# Etapa 2: Parar serviços
+log "Parando serviços do Zabbix, Nginx e PHP..."
+systemctl stop zabbix-server zabbix-agent nginx php8.2-fpm || { log "Erro ao parar os serviços"; exit 1; }
+
+# Etapa 3: Adicionar repositório da versão 7.0
+log "Adicionando repositório do Zabbix 7.0..."
+wget https://repo.zabbix.com/zabbix/7.0/debian/pool/main/z/zabbix-release/zabbix-release_latest+debian12_all.deb -O /tmp/zabbix-release.deb
+dpkg -i /tmp/zabbix-release.deb
+apt update || { log "Erro ao atualizar repositórios"; exit 1; }
+
+# Etapa 4: Atualizar pacotes do Zabbix
+log "Atualizando pacotes do Zabbix para a versão 7.0..."
+apt upgrade -y zabbix-server-pgsql zabbix-frontend-php zabbix-agent || { log "Erro ao atualizar os pacotes do Zabbix"; exit 1; }
+
+# Etapa 5: Atualizar o banco de dados
+log "Atualizando o banco de dados do Zabbix..."
+zcat /usr/share/doc/zabbix-server-pgsql*/create.sql.gz | psql -U "$DB_USER" -h "$DB_HOST" "$DB_NAME" || { log "Erro ao atualizar o banco de dados"; exit 1; }
+
+# Etapa 6: Verificar e ajustar configurações
+log "Verificando configurações do frontend e PHP..."
+PHP_INI="/etc/zabbix/php-fpm.conf"
+if [ -f "$PHP_INI" ]; then
+    log "Arquivo de configuração PHP encontrado."
+else
+    log "Arquivo de configuração PHP não encontrado. Verifique as configurações manualmente."
+fi
+
+log "Verificando configurações do Nginx..."
+if [ -f "$NGINX_CONF" ]; then
+    log "Configuração do Nginx encontrada."
+else
+    log "Configuração do Nginx não encontrada. Verifique as configurações manualmente."
+fi
+
+# Etapa 7: Reiniciar serviços
+log "Reiniciando serviços..."
+systemctl start zabbix-server zabbix-agent nginx php8.2-fpm || { log "Erro ao reiniciar os serviços"; exit 1; }
+
+log "Atualização concluída com sucesso! Verifique o Zabbix frontend para garantir que tudo está funcionando corretamente."
